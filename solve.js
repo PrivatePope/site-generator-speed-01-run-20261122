@@ -45,6 +45,12 @@ function isWS(c) {
   );
 }
 
+/** JavaScript whitespace (\s) as a table over UTF-16 code units, for word counting. */
+const WS_TABLE = new Uint8Array(65536);
+for (const c of [9, 10, 11, 12, 13, 32, 160, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff])
+  WS_TABLE[c] = 1;
+for (let c = 0x2000; c <= 0x200a; c++) WS_TABLE[c] = 1;
+
 /** The words of a body's lines: the runs of characters other than whitespace in them all. */
 function wordsOfLines(lines) {
   let n = 0;
@@ -52,21 +58,7 @@ function wordsOfLines(lines) {
     const text = lines[li];
     let inWord = false;
     for (let i = 0; i < text.length; i++) {
-      const c = text.charCodeAt(i);
-      if (
-        c === 32 ||
-        (c >= 9 && c <= 13) ||
-        c === 160 ||
-        c === 0x1680 ||
-        (c >= 0x2000 && c <= 0x200a) ||
-        c === 0x2028 ||
-        c === 0x2029 ||
-        c === 0x202f ||
-        c === 0x205f ||
-        c === 0x3000 ||
-        c === 0xfeff
-      )
-        inWord = false;
+      if (WS_TABLE[text.charCodeAt(i)]) inWord = false;
       else if (!inWord) {
         n++;
         inWord = true;
@@ -1166,11 +1158,14 @@ export function run(input) {
   const site = { title: input.site.title, base_url: base };
   const allTags = tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = posts.slice(0, input.site.recent).map((p) => p.card);
+  // One top scope object, reused for every render (rendering is synchronous; its vars are set per call).
+  const topScope = { vars: null, parent: null };
   const render = (name, varsObj) => {
     const fn = templates.get(name);
     if (fn === undefined) return null;
     const out = [];
-    fn(out, { vars: varsObj, parent: null }, 0, templates, escText, textOf, lookup, truthy);
+    topScope.vars = varsObj;
+    fn(out, topScope, 0, templates, escText, textOf, lookup, truthy);
     return out.join('');
   };
   for (const s of kept) {
