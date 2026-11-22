@@ -45,15 +45,32 @@ function isWS(c) {
   );
 }
 
-/** The words of a body: its runs of characters other than whitespace. */
-function wordsOf(text) {
+/** The words of a body's lines: the runs of characters other than whitespace in them all. */
+function wordsOfLines(lines) {
   let n = 0;
-  let inWord = false;
-  for (let i = 0; i < text.length; i++) {
-    if (isWS(text.charCodeAt(i))) inWord = false;
-    else if (!inWord) {
-      n++;
-      inWord = true;
+  for (let li = 0; li < lines.length; li++) {
+    const text = lines[li];
+    let inWord = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (
+        c === 32 ||
+        (c >= 9 && c <= 13) ||
+        c === 160 ||
+        c === 0x1680 ||
+        (c >= 0x2000 && c <= 0x200a) ||
+        c === 0x2028 ||
+        c === 0x2029 ||
+        c === 0x202f ||
+        c === 0x205f ||
+        c === 0x3000 ||
+        c === 0xfeff
+      )
+        inWord = false;
+      else if (!inWord) {
+        n++;
+        inWord = true;
+      }
     }
   }
   return n;
@@ -360,7 +377,7 @@ function parseFM(text) {
     data[key] = v.value;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
-  return { data, body: lines.slice(close + 1).join('\n') };
+  return { data, bodyLines: lines.slice(close + 1) };
 }
 
 // ---------------------------------------------------------------- Markdown
@@ -536,7 +553,13 @@ function isHR(line) {
 
 /** Whether `line` ends a paragraph: a blank line, a fence, a heading or a thematic break. */
 function endsParagraph(line) {
-  return isBlankST(line) || fenceLang(line) !== null || headingOf(line) !== null || isHR(line);
+  if (line.length === 0) return true;
+  const c0 = line.charCodeAt(0);
+  if (c0 === 32 || c0 === 9) return isBlankST(line);
+  if (c0 === 96) return fenceLang(line) !== null;
+  if (c0 === 35) return headingOf(line) !== null;
+  if (c0 === 45 || c0 === 42) return isHR(line);
+  return false;
 }
 
 /** A list's first line: { ordered, start, text }, or null. */
@@ -563,93 +586,112 @@ function isContinued(line) {
 }
 
 /**
- * `src` rendered: its HTML (each block on its own lines, a "\n" after the last), its table of contents
+ * `lines` rendered: its HTML (each block on its own lines, a "\n" after the last), its table of contents
  * (every level 2 and 3 heading: level, id and its inline HTML) and its excerpt (the first paragraph's
  * inline HTML, or ""). `link(target)` resolves a link's href; `slugCache` is this run's slug cache.
  */
-function renderMD(src, link, slugCache) {
-  const lines = src.split('\n');
+function renderMD(lines, link, slugCache) {
   const N = lines.length;
   const blocks = [];
   const toc = [];
   let excerpt = null;
   const ids = new Set();
   let i = 0;
+  // One list's blocks, from its first line `first` (already matched); `i` is past that line's start.
+  const listBlock = (first) => {
+    const isOrdered = first.ordered;
+    const items = [[trimST(first.text)]];
+    while (i < N) {
+      const m = listStart(lines[i]);
+      if (m !== null && m.ordered === isOrdered) {
+        items.push([trimST(m.text)]);
+        i++;
+      } else if (isContinued(lines[i])) {
+        items[items.length - 1].push(trimST(lines[i]));
+        i++;
+      } else break;
+    }
+    const tag = isOrdered ? 'ol' : 'ul';
+    const open = isOrdered && first.start !== 1 ? '<ol start="' + first.start + '">' : '<' + tag + '>';
+    let html = open + '\n';
+    for (let k = 0; k < items.length; k++) html += '<li>' + inline(items[k].join('\n'), link) + '</li>\n';
+    html += '</' + tag + '>\n';
+    blocks.push(html);
+  };
   while (i < N) {
     const line = lines[i];
-    if (isBlankST(line)) {
-      i++;
-      continue;
-    }
-    const fl = fenceLang(line);
-    if (fl !== null) {
-      const body = [];
-      i++;
-      while (i < N && fenceLang(lines[i]) !== '') body.push(lines[i++]);
-      i++;
-      const cls = fl === '' ? '' : ' class="language-' + esc(fl) + '"';
-      const inner = body.length === 0 ? '' : esc(body.join('\n')) + '\n';
-      blocks.push('<pre><code' + cls + '>' + inner + '</code></pre>\n');
-      continue;
-    }
-    const hd = headingOf(line);
-    if (hd !== null) {
-      let slug = slugCache.get(hd.text);
-      if (slug === undefined) {
-        slug = slugifyCore(hd.text);
-        slugCache.set(hd.text, slug);
+    // Dispatch on the first character: no block marker can start later in the line.
+    if (line.length === 0 || line.charCodeAt(0) === 32 || line.charCodeAt(0) === 9) {
+      if (isBlankST(line)) {
+        i++;
+        continue;
       }
-      const id = uniqueSlug(slug, ids);
-      const html = inline(hd.text, link);
-      blocks.push('<h' + hd.depth + ' id="' + id + '">' + html + '</h' + hd.depth + '>\n');
-      if (hd.depth === 2 || hd.depth === 3) toc.push({ level: hd.depth, id, html });
-      i++;
-      continue;
-    }
-    if (isHR(line)) {
-      blocks.push('<hr>\n');
-      i++;
-      continue;
-    }
-    if (line.charCodeAt(0) === 62) {
-      const body = [];
-      while (i < N && lines[i].charCodeAt(0) === 62) {
-        const l = lines[i++];
-        body.push(l.charCodeAt(1) === 32 ? l.slice(2) : l.slice(1));
-      }
-      const ls = [];
-      for (let k = 0; k < body.length; k++) {
-        const t = trimST(body[k]);
-        if (t !== '') ls.push(t);
-      }
-      blocks.push(
-        ls.length === 0
-          ? '<blockquote>\n</blockquote>\n'
-          : '<blockquote>\n<p>' + inline(ls.join('\n'), link) + '</p>\n</blockquote>\n',
-      );
-      continue;
-    }
-    const ls0 = listStart(line);
-    if (ls0 !== null) {
-      const isOrdered = ls0.ordered;
-      const items = [];
-      while (i < N) {
-        const m = listStart(lines[i]);
-        if (m !== null && m.ordered === isOrdered) {
-          items.push([trimST(m.text)]);
+    } else {
+      const c0 = line.charCodeAt(0);
+      if (c0 === 96) {
+        const fl = fenceLang(line);
+        if (fl !== null) {
+          const body = [];
           i++;
-        } else if (isContinued(lines[i])) {
-          items[items.length - 1].push(trimST(lines[i]));
+          while (i < N && fenceLang(lines[i]) !== '') body.push(lines[i++]);
           i++;
-        } else break;
+          const cls = fl === '' ? '' : ' class="language-' + esc(fl) + '"';
+          const inner = body.length === 0 ? '' : esc(body.join('\n')) + '\n';
+          blocks.push('<pre><code' + cls + '>' + inner + '</code></pre>\n');
+          continue;
+        }
+      } else if (c0 === 35) {
+        const hd = headingOf(line);
+        if (hd !== null) {
+          let slug = slugCache.get(hd.text);
+          if (slug === undefined) {
+            slug = slugifyCore(hd.text);
+            slugCache.set(hd.text, slug);
+          }
+          const id = uniqueSlug(slug, ids);
+          const html = inline(hd.text, link);
+          blocks.push('<h' + hd.depth + ' id="' + id + '">' + html + '</h' + hd.depth + '>\n');
+          if (hd.depth === 2 || hd.depth === 3) toc.push({ level: hd.depth, id, html });
+          i++;
+          continue;
+        }
+      } else if (c0 === 45 || c0 === 42) {
+        if (isHR(line)) {
+          blocks.push('<hr>\n');
+          i++;
+          continue;
+        }
+        const ls0 = listStart(line);
+        if (ls0 !== null) {
+          i++;
+          listBlock(ls0);
+          continue;
+        }
+      } else if (c0 === 62) {
+        const body = [];
+        while (i < N && lines[i].charCodeAt(0) === 62) {
+          const l = lines[i++];
+          body.push(l.charCodeAt(1) === 32 ? l.slice(2) : l.slice(1));
+        }
+        const ls = [];
+        for (let k = 0; k < body.length; k++) {
+          const t = trimST(body[k]);
+          if (t !== '') ls.push(t);
+        }
+        blocks.push(
+          ls.length === 0
+            ? '<blockquote>\n</blockquote>\n'
+            : '<blockquote>\n<p>' + inline(ls.join('\n'), link) + '</p>\n</blockquote>\n',
+        );
+        continue;
+      } else if (c0 >= 48 && c0 <= 57) {
+        const ls0 = listStart(line);
+        if (ls0 !== null) {
+          i++;
+          listBlock(ls0);
+          continue;
+        }
       }
-      const tag = isOrdered ? 'ol' : 'ul';
-      const open = isOrdered && ls0.start !== 1 ? '<ol start="' + ls0.start + '">' : '<' + tag + '>';
-      let html = open + '\n';
-      for (let k = 0; k < items.length; k++) html += '<li>' + inline(items[k].join('\n'), link) + '</li>\n';
-      html += '</' + tag + '>\n';
-      blocks.push(html);
-      continue;
     }
     const body = [trimST(line)];
     i++;
@@ -806,10 +848,21 @@ function truthy(v) {
   return v !== undefined && v !== null && v !== false && v !== '' && v !== 0;
 }
 
+/** A value as an escaped variable writes it: strings escaped, numbers and booleans in their own digits. */
+function escText(v) {
+  if (typeof v === 'string') return esc(v);
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (Array.isArray(v)) return esc(textOf(v));
+  return '';
+}
+
 /**
- * A template compiled to a render function (out, scope, depth, tpls, esc, textOf, lookup, truthy):
+ * A template compiled to a render function (out, scope, depth, tpls, escText, textOf, lookup, truthy):
  * it pushes the template's output onto `out` (an array of strings). Paths are hoisted to constants,
- * loops use plain for loops, includes call the compiled template for the name.
+ * loops use plain for loops, includes call the compiled template for the name. Each loop's scope
+ * frame and loop record are created once per render (hoisted to the function's top) and their
+ * fields set per element, so iterating allocates nothing.
  */
 function compileTemplate(name, src) {
   const nodes = parseTemplateTree(name, src);
@@ -826,11 +879,12 @@ function compileTemplate(name, src) {
     return ix;
   };
   let uid = 0;
+  const decls = [];
   const gen = (ns, scopeVar, out) => {
     for (const n of ns) {
       if (n.kind === 'text') out.push('out.push(' + JSON.stringify(n.text) + ');');
       else if (n.kind === 'var')
-        out.push('out.push(esc(textOf(lookup(' + scopeVar + ',P' + pid(n.path) + '))));');
+        out.push('out.push(escText(lookup(' + scopeVar + ',P' + pid(n.path) + ')));');
       else if (n.kind === 'raw') out.push('out.push(textOf(lookup(' + scopeVar + ',P' + pid(n.path) + ')));');
       else if (n.kind === 'if') {
         out.push(
@@ -846,42 +900,40 @@ function compileTemplate(name, src) {
       } else if (n.kind === 'for') {
         const u = ++uid;
         const sv = 's' + u;
-        out.push('var a' + u + '=lookup(' + scopeVar + ',P' + pid(n.path) + ');');
-        out.push(
-          'if(Array.isArray(a' +
-            u +
-            ')){for(var k' +
-            u +
-            '=0;k' +
-            u +
-            '<a' +
-            u +
-            '.length;k' +
-            u +
-            '++){',
-        );
-        out.push(
+        const lv = 'l' + u;
+        decls.push(
           'var ' +
             sv +
-            '={vars:{[' +
-            JSON.stringify(n.name) +
-            ']:a' +
+            '={vars:{},parent:' +
+            scopeVar +
+            '};var ' +
+            lv +
+            '={index:0,first:false,last:false,length:0};' +
+            sv +
+            '.vars.loop=' +
+            lv +
+            ';',
+        );
+        out.push('var a' + u + '=lookup(' + scopeVar + ',P' + pid(n.path) + ');');
+        out.push('if(Array.isArray(a' + u + ')){');
+        out.push(lv + '.length=a' + u + '.length;');
+        out.push('for(var k' + u + '=0;k' + u + '<a' + u + '.length;k' + u + '++){');
+        if (n.name !== 'loop') out.push(sv + '.vars[' + JSON.stringify(n.name) + ']=a' + u + '[k' + u + '];');
+        out.push(
+          lv +
+            '.index=k' +
             u +
-            '[k' +
+            '+1;' +
+            lv +
+            '.first=k' +
             u +
-            '],loop:{index:k' +
-            u +
-            '+1,first:k' +
-            u +
-            '===0,last:k' +
+            '===0;' +
+            lv +
+            '.last=k' +
             u +
             '===a' +
             u +
-            '.length-1,length:a' +
-            u +
-            '.length}},parent:' +
-            scopeVar +
-            '};',
+            '.length-1;',
         );
         gen(n.body, sv, out);
         out.push('}}');
@@ -898,7 +950,7 @@ function compileTemplate(name, src) {
             u +
             '(out,' +
             scopeVar +
-            ',depth+1,tpls,esc,textOf,lookup,truthy);',
+            ',depth+1,tpls,escText,textOf,lookup,truthy);',
         );
       }
     }
@@ -907,7 +959,17 @@ function compileTemplate(name, src) {
   gen(nodes, 'scope', lines);
   let head = '';
   for (let i = 0; i < paths.length; i++) head += 'var P' + i + '=' + JSON.stringify(paths[i]) + ';';
-  return new Function('out', 'scope', 'depth', 'tpls', 'esc', 'textOf', 'lookup', 'truthy', head + lines.join(''));
+  return new Function(
+    'out',
+    'scope',
+    'depth',
+    'tpls',
+    'escText',
+    'textOf',
+    'lookup',
+    'truthy',
+    head + decls.join('') + lines.join(''),
+  );
 }
 
 // ---------------------------------------------------------------- the build
@@ -940,7 +1002,11 @@ export function run(input) {
   const sources = [];
   const statics = [];
   for (const f of files) {
-    if (f.path.endsWith('.md')) sources.push({ path: f.path, text: f.content.replace(/\r\n?/g, '\n') });
+    if (f.path.endsWith('.md'))
+      sources.push({
+        path: f.path,
+        text: f.content.indexOf('\r') === -1 ? f.content : f.content.replace(/\r\n?/g, '\n'),
+      });
     else statics.push(f);
   }
 
@@ -953,7 +1019,7 @@ export function run(input) {
       continue;
     }
     s.data = fm.data;
-    s.body = fm.body;
+    s.bodyLines = fm.bodyLines;
     s.post = s.path.startsWith('posts/');
     let own;
     if (s.path.startsWith('tags/')) own = 'tags';
@@ -1013,7 +1079,7 @@ export function run(input) {
       broken.add('broken-link ' + s.path + ' -> ' + target);
       return target;
     };
-    const md = renderMD(s.body, link, slugCache);
+    const md = renderMD(s.bodyLines, link, slugCache);
     s.html = md.html;
     s.toc = md.toc;
     s.excerpt = md.excerpt;
@@ -1090,7 +1156,7 @@ export function run(input) {
       date_long: s.data.date === undefined ? '' : longDate(s.data.date),
       summary: s.data.summary === undefined ? '' : s.data.summary,
       excerpt: s.excerpt,
-      reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
+      reading_minutes: Math.max(1, Math.ceil(wordsOfLines(s.bodyLines) / 200)),
       tags: s.tagRefs.map((t) => ({ name: t.name, slug: t.slug, url: t.url })),
     };
   }
@@ -1100,20 +1166,11 @@ export function run(input) {
   const site = { title: input.site.title, base_url: base };
   const allTags = tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = posts.slice(0, input.site.recent).map((p) => p.card);
-  const render = (name, vars) => {
+  const render = (name, varsObj) => {
     const fn = templates.get(name);
     if (fn === undefined) return null;
     const out = [];
-    fn(
-      out,
-      { vars: Object.assign({ site, tags: allTags, recent }, vars), parent: null },
-      0,
-      templates,
-      esc,
-      textOf,
-      lookup,
-      truthy,
-    );
+    fn(out, { vars: varsObj, parent: null }, 0, templates, escText, textOf, lookup, truthy);
     return out.join('');
   };
   for (const s of kept) {
@@ -1125,13 +1182,16 @@ export function run(input) {
       older: linkOf(s.older === undefined ? null : s.older),
       is_post: s.post,
     });
-    output[s.outDir + '/index.html'] = render(s.layout, { page });
+    output[s.outDir + '/index.html'] = render(s.layout, { site, tags: allTags, recent, page });
   }
   const per = input.site.per_page;
   const pages = Math.max(1, Math.ceil(posts.length / per));
   const indexUrl = (k) => (k === 1 ? base + '/' : base + '/page/' + k + '/');
   for (let k = 1; k <= pages; k++) {
     const html = render('index', {
+      site,
+      tags: allTags,
+      recent,
       posts: posts.slice((k - 1) * per, k * per).map((p) => p.card),
       pager: {
         number: k,
@@ -1145,11 +1205,14 @@ export function run(input) {
   }
   for (const t of tags) {
     const html = render('tag', {
+      site,
+      tags: allTags,
+      recent,
       tag: { name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => p.card) },
     });
     if (html !== null) output['tags/' + t.slug + '/index.html'] = html;
   }
-  const tagsHtml = render('tags', {});
+  const tagsHtml = render('tags', { site, tags: allTags, recent });
   if (tagsHtml !== null) output['tags/index.html'] = tagsHtml;
   for (const f of statics) {
     if (Object.hasOwn(output, f.path)) report.push('shadowed ' + f.path + ': a built page has its path');
