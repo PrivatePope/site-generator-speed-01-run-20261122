@@ -419,26 +419,26 @@ const WS_RE = /\s/;
 
 /** `s` rendered inline; `link(target)` is a link's href. */
 function inline(s, link) {
-  const parts = [];
+  let out = '';
   let i = 0;
   const N = s.length;
   while (i < N) {
     INLINE_SPECIAL.lastIndex = i;
     const m = INLINE_SPECIAL.exec(s);
     if (m === null) {
-      parts.push(esc(s.slice(i)));
+      out += esc(s.slice(i));
       break;
     }
     const j = m.index;
-    if (j > i) parts.push(esc(s.slice(i, j)));
+    if (j > i) out += esc(s.slice(i, j));
     const c = s.charCodeAt(j);
     if (c === 92) {
       // backslash
       if (j + 1 < N && isEscapableCode(s.charCodeAt(j + 1))) {
-        parts.push(esc(s[j + 1]));
+        out += esc(s[j + 1]);
         i = j + 2;
       } else {
-        parts.push('\\');
+        out += '\\';
         i = j + 1;
       }
       continue;
@@ -447,10 +447,10 @@ function inline(s, link) {
       // backtick: a code span closed by the next backtick, at least one character between
       const k = s.indexOf('`', j + 1);
       if (k > j + 1) {
-        parts.push('<code>' + esc(s.slice(j + 1, k)) + '</code>');
+        out += '<code>' + esc(s.slice(j + 1, k)) + '</code>';
         i = k + 1;
       } else {
-        parts.push('`');
+        out += '`';
         i = j + 1;
       }
       continue;
@@ -460,19 +460,19 @@ function inline(s, link) {
       if (s.charCodeAt(j + 1) === 42) {
         const k = findUnescaped(s, '**', j + 2);
         if (k > j + 2) {
-          parts.push('<strong>' + inline(s.slice(j + 2, k), link) + '</strong>');
+          out += '<strong>' + inline(s.slice(j + 2, k), link) + '</strong>';
           i = k + 2;
         } else {
-          parts.push('**');
+          out += '**';
           i = j + 2;
         }
       } else {
         const k = findSingleStar(s, j + 1);
         if (k > j + 1) {
-          parts.push('<em>' + inline(s.slice(j + 1, k), link) + '</em>');
+          out += '<em>' + inline(s.slice(j + 1, k), link) + '</em>';
           i = k + 1;
         } else {
-          parts.push('*');
+          out += '*';
           i = j + 1;
         }
       }
@@ -483,14 +483,14 @@ function inline(s, link) {
     const mm = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
     const target = mm === -1 ? '' : s.slice(k + 2, mm);
     if (target !== '' && !WS_RE.test(target)) {
-      parts.push('<a href="' + esc(link(target)) + '">' + inline(s.slice(j + 1, k), link) + '</a>');
+      out += '<a href="' + esc(link(target)) + '">' + inline(s.slice(j + 1, k), link) + '</a>';
       i = mm + 1;
     } else {
-      parts.push('[');
+      out += '[';
       i = j + 1;
     }
   }
-  return parts.join('');
+  return out;
 }
 
 /** A fence's language, or null when `line` does not open a fence. */
